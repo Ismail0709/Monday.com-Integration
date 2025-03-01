@@ -3,7 +3,11 @@ const express = require('express');
 const fs = require('fs');
 const pdf = require('pdf-parse');
 const axios = require('axios');
+const mondaySdk = require('monday-sdk-js');
 const app = express();
+
+const monday = mondaySdk();
+monday.setToken(process.env.MONDAY_API_KEY);
 
 async function extractPdfData() {
     try {
@@ -18,87 +22,77 @@ async function extractPdfData() {
 
 function extractFields(text) {
     const lines = text.split("\n").map(line => line.trim());
-
-    let workOrder = "N/A", purchaseOrder = "N/A", scheduledDate = "N/A", location = "N/A";
-    let checkInPhone = "N/A", ivrBackupPhone = "N/A", flatRatePrice = "N/A", notes = "N/A";
-    let project = "N/A", pm = "N/A", state = "N/A", woFile = "N/A"; 
+    
+    let workOrder = "N/A", purchaseOrder = "N/A", state = "N/A", pm = "N/A", notes = "N/A";
+    let itemDescription = "N/A", unitCost = "N/A", quantity = "N/A", totalCost = "N/A";
+    let shippingTerms = "N/A", paymentTerms = "N/A", orderedBy = "N/A";
 
     for (let i = 0; i < lines.length; i++) {
         if (lines[i].toLowerCase().includes("work order")) {
             workOrder = lines[i].split(":")[1]?.trim() || "N/A";
         } else if (lines[i].toLowerCase().includes("purchase order")) {
             purchaseOrder = lines[i].split(":")[1]?.trim() || "N/A";
-        } else if (lines[i].toLowerCase().includes("scheduled date")) {
-            scheduledDate = lines[i].split(":")[1]?.trim() || "N/A";
-        } else if (lines[i].toLowerCase().includes("location")) {
-            location = lines[i].split(":")[1]?.trim() || "N/A";
-        } else if (lines[i].toLowerCase().includes("check-in via store phone")) {
-            checkInPhone = lines[i].split(":")[1]?.trim() || "N/A";
-        } else if (lines[i].toLowerCase().includes("ivr backup check-in")) {
-            ivrBackupPhone = lines[i].split(":")[1]?.trim() || "N/A";
-        } else if (lines[i].toLowerCase().includes("flat rate price")) {
-            flatRatePrice = lines[i].split("$")[1]?.trim() || "N/A";
-        } else if (lines[i].toLowerCase().includes("ordered by")) {
-            pm = lines[i].split(":")[1]?.trim() || "N/A";
         } else if (lines[i].toLowerCase().includes("state")) {
             state = lines[i].split(":")[1]?.trim() || "N/A";
+        } else if (lines[i].toLowerCase().includes("ordered by")) {
+            orderedBy = lines[i].split(":")[1]?.trim() || "N/A";
         } else if (lines[i].toLowerCase().includes("remarks")) {
-            notes = lines[i + 1]?.trim() || "N/A";  // Assuming remarks contain notes in the next line
+            notes = lines[i + 1]?.trim() || "N/A";
+        } else if (lines[i].toLowerCase().includes("nte:")) {
+            itemDescription = lines[i];
+            unitCost = lines[i + 1].split(" ")[0]?.trim() || "N/A";
+            quantity = lines[i + 1].split(" ")[1]?.trim() || "N/A";
+            totalCost = lines[i + 1].split(" ")[2]?.trim() || "N/A";
+        } else if (lines[i].toLowerCase().includes("shipping terms")) {
+            shippingTerms = lines[i].split(":")[1]?.trim() || "N/A";
+        } else if (lines[i].toLowerCase().includes("payment terms")) {
+            paymentTerms = lines[i].split(":")[1]?.trim() || "N/A";
         }
     }
 
     return {
-        project: "Project Name", // You might need to set this dynamically
-        pm,
         workOrder,
         purchaseOrder,
         state,
-        woFile: "N/A",
+        pm,
+        orderedBy,
         notes,
-        location,
-        checkInPhone,
-        ivrBackupPhone,
-        flatRatePrice
+        itemDescription,
+        unitCost,
+        quantity,
+        totalCost,
+        shippingTerms,
+        paymentTerms
     };
 }
 
-async function addTaskToMonday(taskDetails) {
-    const columnValues = JSON.stringify({
-        text_column: `WO: ${taskDetails.workOrder} | PO: ${taskDetails.purchaseOrder}`,
-        date_column: { date: taskDetails.scheduledDate },
-        location_column: taskDetails.location,
-        phone_column: taskDetails.checkInPhone,
-        backup_phone_column: taskDetails.ivrBackupPhone,
-        price_column: taskDetails.flatRatePrice,
-        project_column: taskDetails.project,
-        pm_column: taskDetails.pm,
-        wo_number_column: taskDetails.workOrder,
-        po_number_column: taskDetails.purchaseOrder,
-        state_column: taskDetails.state,
-        wo_file_column: taskDetails.woFile,
-        notes_column: taskDetails.notes
-    });
 
-    const query = `
-    mutation {
-        create_item (
-            board_id: "${process.env.MONDAY_BOARD_ID}", 
-            item_name: "Work Order ${taskDetails.workOrder}", 
-            column_values: ${JSON.stringify(columnValues)}
-        ) {
-            id
-        }
-    }
-    `;
+async function addTaskToMonday(taskDetails) {
+    const columnValues = {
+        "name": `Work Order ${taskDetails.workOrder}`,
+        "person": taskDetails.pm !== "N/A" ? { "personsAndTeams": [{ "id": taskDetails.pm, "kind": "person" }] } : {},
+        "numeric_mknm7fe6": Number(taskDetails.workOrder) || 0,
+        "numeric_mknmh57z": Number(taskDetails.purchaseOrder) || 0,
+        "text_mknmenkj": taskDetails.state,
+        "file_mknmzjw8": taskDetails.woFile,
+        "long_text_mknmgpk": taskDetails.notes
+    };
+
+    console.log("Column Values:", columnValues); // Log the column values
 
     try {
-        const response = await axios.post(
-            "https://api.monday.com/v2",
-            { query },
-            { headers: { "Authorization": process.env.MONDAY_API_KEY, "Content-Type": "application/json" } }
-        );
-        console.log("Task added:", response.data);
-        return response.data;
+        const response = await monday.api(`
+        mutation {
+            create_item (
+                board_id: ${process.env.MONDAY_BOARD_ID},
+                item_name: "Work Order ${taskDetails.workOrder}",
+                column_values: "${JSON.stringify(columnValues).replace(/"/g, '\\"')}"
+            ) {
+                id
+            }
+        }`);
+        console.log("Task added:", response);
+        return response;
     } catch (error) {
         console.error("Error adding task to Monday.com:", error.response ? error.response.data : error);
         return null;
@@ -114,8 +108,8 @@ app.get('/run-task', async (req, res) => {
     }
 
     const taskDetails = extractFields(extractedText);
-
     const result = await addTaskToMonday(taskDetails);
+    
     if (!result) {
         return res.status(500).json({ message: "Failed to add task to Monday.com" });
     }
@@ -123,6 +117,6 @@ app.get('/run-task', async (req, res) => {
     res.json({ message: "Task successfully added to Monday.com", result });
 });
 
-app.listen(process.env.PORT, () => {
-    console.log(`Server is running on port ${process.env.PORT}`);
+app.listen(process.env.PORT || 3000, () => {
+    console.log(`Server is running on port ${process.env.PORT || 3000}`);
 });
