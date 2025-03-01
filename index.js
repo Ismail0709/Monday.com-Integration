@@ -49,7 +49,6 @@ function extractFields(text) {
       shippingTerms = "N/A",
       paymentTerms = "N/A";
 
-  // For Person column, we extract an email from "REMIT ALL INVOICES TO:" but we'll actually override it.
   let pmEmail = "N/A";
   let pmName = "N/A"; 
 
@@ -136,14 +135,10 @@ function extractFields(text) {
     totalCost,
     shippingTerms,
     paymentTerms,
-    // Instead of passing the file path to the file column, we handle file uploads separately.
     woFile: process.env.PDF_PATH || "N/A"
   };
 }
 
-/**
- * Retrieves your own user ID from Monday.com using the "me" query.
- */
 async function getMyUserId() {
   try {
     const meResponse = await monday.api(`
@@ -162,12 +157,8 @@ async function getMyUserId() {
   }
 }
 
-/**
- * Creates a new item on Monday.com.
- * Note: For file columns, it's best to leave them empty and then upload the file separately.
- */
 async function addTaskToMonday(taskDetails) {
-  // Build column values; assign an empty string for the file column.
+
   const columnValues = {
     "name": `Work Order ${taskDetails.workOrder}`,
     "person": { 
@@ -176,7 +167,7 @@ async function addTaskToMonday(taskDetails) {
     "numeric_mknm7fe6": Number(taskDetails.workOrder) || 0,
     "numeric_mknmh57z": Number(taskDetails.purchaseOrder) || 0,
     "text_mknmenkj": taskDetails.state,
-    "file_mknmzjw8": "",  // Leave file column blank
+    "file_mknmzjw8": "", 
     "long_text_mknmgpk": taskDetails.notes
   };
 
@@ -219,17 +210,16 @@ app.get('/run-task', async (req, res) => {
 
   const taskDetails = extractFields(extractedText);
 
-  // Get your user ID via the me query.
   const myUserId = await getMyUserId();
   if (!myUserId) {
     return res.status(500).json({ message: "Failed to fetch your user ID from Monday.com" });
   }
   console.log("My user ID is:", myUserId);
 
-  // Override the person data: assign every item to your user ID.
+  
   taskDetails.pmId = myUserId;
 
-  // Create the item on Monday.com.
+  
   const result = await addTaskToMonday(taskDetails);
   if (!result) {
     return res.status(500).json({ message: "Failed to add task to Monday.com" });
@@ -237,6 +227,132 @@ app.get('/run-task', async (req, res) => {
 
   res.json({ message: "Task successfully added to Monday.com", result });
 });
+
+async function extractEmailPdfData() {
+    try {
+      const readData = fs.readFileSync(process.env.EMAIL_PDF_PATH);
+      const data = await pdf(readData);
+      return data.text;
+    } catch (err) {
+      console.error("Error extracting data from PDF file:", err);
+      return null;
+    }
+  }
+
+  function parseEmailContent(emailText) {
+    let workOrder = "N/A";
+    let purchaseOrder = "N/A";
+    let scheduledDate = "N/A";
+    let location = "N/A";
+    let checkInPhone = "N/A";
+    let flatRatePrice = "N/A";
+    let notes = emailText; // default entire email text as notes
+    let instructions = "N/A"; // initialize instructions
+    let state = "N/A";
+  
+    // Extract Work Order: matches "WO" followed by digits
+    const woMatch = emailText.match(/WO\s*(\d+)/i);
+    if (woMatch) {
+      workOrder = woMatch[1];
+    }
+  
+    // Extract Purchase Order: matches "PO" followed by digits
+    const poMatch = emailText.match(/PO\s*(\d+)/i);
+    if (poMatch) {
+      purchaseOrder = poMatch[1];
+    }
+  
+    // Extract scheduled date: expects a pattern like "scheduled date of 12/5/2023"
+    const dateMatch = emailText.match(/scheduled date of\s*([\d\/]+)/i);
+    if (dateMatch) {
+      scheduledDate = dateMatch[1];
+    }
+  
+    // Extract check-in phone number: looks for "CALLING" followed by digits and dashes
+    const phoneMatch = emailText.match(/CALLING\s*([\d\-]+)/i);
+    if (phoneMatch) {
+      checkInPhone = phoneMatch[1];
+    }
+  
+    // Extract flat rate price: looks for "FLAT RATE price" followed by a dollar sign and number
+    const priceMatch = emailText.match(/FLAT RATE price.*?\$(\d+(?:\.\d+)?)/i);
+    if (priceMatch) {
+      flatRatePrice = priceMatch[1];
+    }
+  
+    // Extract location: an example method that captures text after "WO/PO" up to the next comma.
+    const locMatch = emailText.match(/WO\/PO\s+([^,]+),/i);
+    if (locMatch) {
+      location = locMatch[1].trim();
+    }
+  
+    // Extract state from location (e.g., "Brunswick, GA 31520")
+    const stateMatch = location.match(/,\s*([A-Z]{2})\b/);
+    if (stateMatch) {
+      state = stateMatch[1];
+    }
+  
+    // Extract notes and instructions: split based on "Deliverables"
+    const deliverablesMatch = emailText.split(/Deliverables/i);
+    if (deliverablesMatch.length > 1) {
+      notes = deliverablesMatch[0].trim();
+      instructions = deliverablesMatch[1].trim();
+    } else {
+      notes = emailText.trim(); // fallback if "Deliverables" not found
+    }
+  
+    return {
+      workOrder,
+      purchaseOrder,
+      scheduledDate,
+      location,
+      checkInPhone,
+      flatRatePrice,
+      notes,
+      instructions,
+      state
+  };
+}
+  
+  app.get('/run-email-task', async (req, res) => {
+    console.log("Processing email (from PDF) and extracting data...");
+  
+    const extractedText = await extractEmailPdfData();
+    if (!extractedText) {
+      return res.status(500).json({ message: "Failed to extract data from PDF" });
+    }
+  
+    const parsedData = parseEmailContent(extractedText);
+    console.log("Parsed Email Data:", parsedData);
+  
+    // Get your user ID via the me query.
+    const myUserId = await getMyUserId();
+    if (!myUserId) {
+      return res.status(500).json({ message: "Failed to fetch your user ID from Monday.com" });
+    }
+    console.log("My user ID is:", myUserId);
+  
+    // Build task details with parsed data and your user ID
+    const taskDetails = {
+      workOrder: parsedData.workOrder,
+      purchaseOrder: parsedData.purchaseOrder,
+      state: parsedData.state, // extracted from the location
+      notes: parsedData.notes,
+      scheduledDate: parsedData.scheduledDate,
+      location: parsedData.location,
+      checkInPhone: parsedData.checkInPhone,
+      flatRatePrice: parsedData.flatRatePrice,
+      instructions: parsedData.instructions,
+      pmId: myUserId // Use your actual user ID
+    };
+  
+    const result = await addTaskToMonday(taskDetails);
+    if (!result) {
+      return res.status(500).json({ message: "Failed to add task to Monday.com" });
+    }
+  
+    res.json({ message: "Task successfully added to Monday.com", result });
+  });
 
 app.listen(process.env.PORT || 3000, () => {
   console.log(`Server is running on port ${process.env.PORT || 3000}`);
